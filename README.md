@@ -1,16 +1,19 @@
 # goscout
-
 fast and clean network reconnaissance tool for bug bounty.
 
-## features
+## install
+```bash
+go install github.com/logivex/goscout/cmd/goscout@latest
+```
+> requires Go 1.21+
 
+## features
 - SYN port scanning
 - banner grabbing with CVE link
 - reverse DNS lookup
 - pipeline friendly
 
 ## usage
-
 ```bash
 # direct
 goscout -t example.com --top 1000 --banner --rdns
@@ -23,7 +26,6 @@ goscout -t targets.txt --top 1000
 ```
 
 ## flags
-
 | flag | default | description |
 |------|---------|-------------|
 | `-t` | — | target: IP, domain, CIDR, file |
@@ -42,16 +44,13 @@ goscout -t targets.txt --top 1000
 | `--debug` | false | debug mode |
 
 ## requirements
-
 - Linux
 - root/sudo for SYN scan
 
 ## exit codes
-
 | code | meaning |
 |------|---------|
 | 0 | open ports found |
 | 1 | no open ports |
 | 2 | input error |
 | 3 | permission error |
-| 4 | network error |
