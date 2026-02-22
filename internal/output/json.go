@@ -24,6 +24,19 @@ type JSONResult struct {
 	Meta   JSONMeta   `json:"meta"`
 }
 
+func NewJSONResult(target, ip, rdns string, ports []JSONPort, meta JSONMeta) JSONResult {
+	if ports == nil {
+		ports = []JSONPort{}
+	}
+	return JSONResult{
+		Target: target,
+		IP:     ip,
+		RDNS:   rdns,
+		Ports:  ports,
+		Meta:   meta,
+	}
+}
+
 type JSONMeta struct {
 	Scanned  int    `json:"scanned"`
 	Open     int    `json:"open"`
