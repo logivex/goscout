@@ -1,3 +1,5 @@
+//go:build linux
+
 package rawsock
 
 import (
@@ -6,17 +8,21 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
-// ─── Socket ───────────────────────────────────────────────────────────────────
-
-// Socket holds two raw file descriptors: one for sending, one for receiving.
+// Socket holds two file descriptors:
+//   - sendFd: AF_INET SOCK_RAW for sending SYN packets
+//   - recvFd: AF_PACKET SOCK_RAW for receiving all incoming frames
 type Socket struct {
 	sendFd int
 	recvFd int
 }
 
-// Open creates and returns a Socket with separate send and recv file descriptors.
+// Open creates send and receive sockets and attaches a BPF filter to the
+// receive socket so only TCP SYN-ACK / RST packets destined for our
+// ephemeral port range reach userspace.
 func Open() (*Socket, error) {
 	sendFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
 	if err != nil {
@@ -39,6 +45,14 @@ func Open() (*Socket, error) {
 		return nil, err
 	}
 
+	// Attach BPF filter: accept only TCP SYN-ACK or RST packets whose
+	// destination port falls in the ephemeral range [49152, 65535].
+	if err := attachScanFilter(recvFd, 49152); err != nil {
+		syscall.Close(sendFd)
+		syscall.Close(recvFd)
+		return nil, fmt.Errorf("bpf attach: %w", err)
+	}
+
 	return &Socket{sendFd: sendFd, recvFd: recvFd}, nil
 }
 
@@ -55,28 +69,75 @@ func (s *Socket) Send(dst net.IP, packet []byte) error {
 	return syscall.Sendto(s.sendFd, packet, 0, addr)
 }
 
-// Recv reads one packet from the recv socket with the given timeout.
+// Recv reads the next packet from the receive socket.
+// It strips the 14-byte Ethernet header added by AF_PACKET.
 func (s *Socket) Recv(timeout time.Duration) ([]byte, error) {
 	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
 	if err := syscall.SetsockoptTimeval(s.recvFd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
 		return nil, err
 	}
 
-	buf := make([]byte, 4096)
+	buf := make([]byte, 65536)
 	n, _, err := syscall.Recvfrom(s.recvFd, buf, 0)
 	if err != nil {
 		return nil, err
 	}
-
 	if n < 14 {
-		return nil, fmt.Errorf("packet too short")
+		return nil, fmt.Errorf("packet too short: %d bytes", n)
 	}
 	return buf[14:n], nil
 }
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
+// ── BPF filter ───────────────────────────────────────────────────────────────
+//
+// Packet layout (AF_PACKET, Ethernet frame + IPv4, standard IHL=5):
+//
+//	[12:14]  EtherType  → must be 0x0800 (IPv4)
+//	[23]     IP Proto   → must be 0x06   (TCP)
+//	[36:38]  TCP DstPort → must be >= minPort
+//	[47]     TCP Flags  → must have RST(0x04) or SYN+ACK(0x12) set
+//
+// Offsets: Ethernet(14) + IP header(20) + TCP dst port offset(2) = 36
+//          Ethernet(14) + IP header(20) + TCP flags offset(13)   = 47
 
-// htons converts a uint16 from host to network byte order.
+// attachScanFilter builds and attaches a BPF program to fd.
+// Only TCP SYN-ACK or RST packets with dst port >= minPort pass through.
+func attachScanFilter(fd int, minPort uint16) error {
+	filter := []unix.SockFilter{
+		// [0] load EtherType (half-word at offset 12)
+		{Code: 0x28, K: 12},
+		// [1] keep if IPv4 (0x0800), else DROP
+		{Code: 0x15, Jt: 0, Jf: 6, K: 0x0800},
+		// [2] load IP Protocol (byte at offset 23)
+		{Code: 0x30, K: 23},
+		// [3] keep if TCP (0x06), else DROP
+		{Code: 0x15, Jt: 0, Jf: 4, K: 0x06},
+		// [4] load TCP dst port (half-word at offset 36)
+		{Code: 0x28, K: 36},
+		// [5] keep if >= minPort, else DROP
+		{Code: 0x35, Jt: 0, Jf: 2, K: uint32(minPort)},
+		// [6] load TCP flags (byte at offset 47)
+		{Code: 0x30, K: 47},
+		// [7] RST bit (0x04) set? yes → ACCEPT, no → fall through
+		{Code: 0x45, Jt: 1, Jf: 0, K: 0x04},
+		// [8] SYN+ACK (0x12) set? yes → ACCEPT, no → DROP
+		{Code: 0x45, Jt: 0, Jf: 1, K: 0x12},
+		// [9] ACCEPT
+		{Code: 0x06, K: 0xFFFF},
+		// [10] DROP
+		{Code: 0x06, K: 0},
+	}
+
+	prog := &unix.SockFprog{
+		Len:    uint16(len(filter)),
+		Filter: &filter[0],
+	}
+	return unix.SetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, prog)
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+// htons converts a uint16 to network byte order.
 func htons(i uint16) uint16 {
 	b := make([]byte, 2)
 	b[0] = byte(i >> 8)
@@ -84,44 +145,11 @@ func htons(i uint16) uint16 {
 	return *(*uint16)(unsafe.Pointer(&b[0]))
 }
 
-// outboundInterface returns the name of the network interface used for outbound traffic.
-func outboundInterface() (string, error) {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-
-	localIP := conn.LocalAddr().(*net.UDPAddr).IP
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-
-	for _, iface := range ifaces {
-		addrs, _ := iface.Addrs()
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip != nil && ip.Equal(localIP) {
-				return iface.Name, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("interface not found")
-}
-
-// ─── permission error ─────────────────────────────────────────────────────────
+// ── PermissionErr ─────────────────────────────────────────────────────────────
 
 // PermissionErr is returned when raw socket creation fails due to insufficient privileges.
 type PermissionErr struct{}
 
-// Error implements the error interface.
 func (e *PermissionErr) Error() string {
 	return "raw socket requires root privileges\n  hint: run with sudo goscout"
 }

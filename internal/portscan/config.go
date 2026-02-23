@@ -2,22 +2,22 @@ package portscan
 
 import "time"
 
-// ─── config ───────────────────────────────────────────────────────────────────
-
+// Config holds tuning parameters for a scan run.
 type Config struct {
-	Rate        int
-	Timeout     time.Duration
-	Concurrency int
-	Retries     int
-	SrcPort     int
+	Rate        int           // packets per second
+	Timeout     time.Duration // wait time for responses after sending
+	Concurrency int           // max simultaneous SYN goroutines
+	Retries     int           // SYN retries per port
+	SrcPort     int           // source port used to filter incoming replies
 }
 
+// DefaultConfig returns sensible defaults for most scans.
 func DefaultConfig() Config {
 	return Config{
 		Rate:        500,
-		Timeout:     800 * time.Millisecond,
+		Timeout:     1200 * time.Millisecond,
 		Concurrency: 1000,
-		Retries:     1,
+		Retries:     2,
 		SrcPort:     54321,
 	}
 }

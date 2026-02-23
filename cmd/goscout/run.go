@@ -19,7 +19,6 @@ import (
 	"github.com/logivex/goscout/internal/output"
 	"github.com/logivex/goscout/internal/portscan"
 	"github.com/logivex/goscout/internal/rdns"
-	"github.com/logivex/goscout/pkg/rawsock"
 )
 
 type inputMode int
@@ -139,21 +138,22 @@ func scanTarget(target string, ports []int, cfg config.Config) error {
 
 	start := time.Now()
 
+	// reduce concurrency for large scans to avoid network buffer overflow
+	concurrency := cfg.Concurrency
+	if len(ports) > 10000 && concurrency > 200 {
+		concurrency = 200
+	}
+
 	scanCfg := portscan.Config{
 		Rate:        cfg.Rate,
 		Timeout:     cfg.Timeout,
-		Concurrency: cfg.Concurrency,
+		Concurrency: concurrency,
 		Retries:     cfg.Retries,
 		SrcPort:     randomPort(),
 	}
 
-	if err := rawsock.BlockRST(scanCfg.SrcPort); err != nil {
-		return err
-	}
-
 	scanner := portscan.New(scanCfg)
 	results, err := scanner.Scan(ip, ports)
-	rawsock.UnblockRST(scanCfg.SrcPort)
 	if err != nil {
 		return err
 	}
@@ -305,16 +305,40 @@ func resolvePorts(cfg config.Config) ([]int, error) {
 	return topPorts(cfg.Top), nil
 }
 
-// parsePorts parses a comma-separated list of port numbers.
+// parsePorts parses a comma-separated list of ports or ranges (e.g. "80,443,8000-8100").
 func parsePorts(s string) ([]int, error) {
 	var ports []int
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 1 || n > 65535 {
-			return nil, fmt.Errorf("invalid port: %s", p)
+	seen := make(map[int]bool)
+
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+
+		if strings.Contains(part, "-") {
+			bounds := strings.SplitN(part, "-", 2)
+			if len(bounds) != 2 {
+				return nil, fmt.Errorf("invalid port range: %s", part)
+			}
+			start, err1 := strconv.Atoi(strings.TrimSpace(bounds[0]))
+			end, err2 := strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if err1 != nil || err2 != nil || start < 1 || end > 65535 || start > end {
+				return nil, fmt.Errorf("invalid port range: %s", part)
+			}
+			for i := start; i <= end; i++ {
+				if !seen[i] {
+					seen[i] = true
+					ports = append(ports, i)
+				}
+			}
+		} else {
+			n, err := strconv.Atoi(part)
+			if err != nil || n < 1 || n > 65535 {
+				return nil, fmt.Errorf("invalid port: %s", part)
+			}
+			if !seen[n] {
+				seen[n] = true
+				ports = append(ports, n)
+			}
 		}
-		ports = append(ports, n)
 	}
 	return ports, nil
 }

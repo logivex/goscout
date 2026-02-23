@@ -7,14 +7,17 @@ import (
 	"github.com/logivex/goscout/pkg/rawsock"
 )
 
+// Scanner performs SYN port scans against a target.
 type Scanner struct {
 	cfg Config
 }
 
+// New returns a Scanner with the given configuration.
 func New(cfg Config) *Scanner {
 	return &Scanner{cfg: cfg}
 }
 
+// Scan sends SYN packets to each port and returns results.
 func (s *Scanner) Scan(target net.IP, ports []int) ([]Result, error) {
 	sock, err := rawsock.Open()
 	if err != nil {
@@ -41,14 +44,18 @@ func (s *Scanner) Scan(target net.IP, ports []int) ([]Result, error) {
 		}(port)
 	}
 
+	// wait for all senders to finish
 	for i := 0; i < cap(sem); i++ {
 		sem <- struct{}{}
 	}
 
+	// wait for replies — fixed window after last packet sent
 	time.Sleep(s.cfg.Timeout)
+
 	receiver.Stop()
 	sock.Close()
+
 	results := tracker.Close(ports)
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	return results, nil
 }
