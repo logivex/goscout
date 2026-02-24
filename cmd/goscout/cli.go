@@ -21,6 +21,7 @@ var (
 	flagNoSYN       = flag.Bool("no-syn", false, "connect scan instead of SYN")
 	flagBanner      = flag.Bool("banner", false, "enable banner grabbing")
 	flagRDNS        = flag.Bool("rdns", false, "enable reverse DNS lookup")
+	flagHTTP        = flag.Bool("http", false, "enable HTTP probe (title, status, redirect)")
 	flagOutput      = flag.String("o", "human", "output format: human, json, csv")
 	flagFile        = flag.String("f", "", "save output to file")
 	flagSilent      = flag.Bool("s", false, "silent mode — results only")
@@ -72,5 +73,6 @@ EXAMPLES:
   goscout -t 1.2.3.4 -p 80,443,8080
   goscout -t targets.txt --full -o json -f out.json
   subfinder -d example.com | goscout --banner -o json
+
 `, version)
 }

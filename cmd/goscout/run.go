@@ -16,6 +16,7 @@ import (
 	"github.com/logivex/goscout/config"
 	"github.com/logivex/goscout/internal/banner"
 	"github.com/logivex/goscout/internal/errors"
+	"github.com/logivex/goscout/internal/httpprobe"
 	"github.com/logivex/goscout/internal/output"
 	"github.com/logivex/goscout/internal/portscan"
 	"github.com/logivex/goscout/internal/rdns"
@@ -165,6 +166,7 @@ func scanTarget(target string, ports []int, cfg config.Config) error {
 	}
 
 	grabber := banner.New(cfg.Timeout)
+	prober := httpprobe.New(cfg.Timeout)
 
 	var jsonPorts []output.JSONPort
 	openCount := 0
@@ -179,7 +181,7 @@ func scanTarget(target string, ports []int, cfg config.Config) error {
 		if r.State == portscan.StateOpen {
 			openCount++
 			if cfg.Banner {
-				if b, err := grabber.Grab(ip.String(), r.Port); err == nil {
+				if b, err := grabber.Grab(target, r.Port); err == nil {
 					svc = b.Service
 					if b.Service != "" && b.Version != "" {
 						ban = fmt.Sprintf("%s/%s", b.Service, b.Version)
@@ -193,6 +195,28 @@ func scanTarget(target string, ports []int, cfg config.Config) error {
 						ban = firstLine
 					}
 					cveLink = b.CVELink
+				}
+			}
+
+			if *flagHTTP {
+				if h, err := prober.Probe(target, r.Port); err == nil {
+					httpInfo := fmt.Sprintf("[%d]", h.StatusCode)
+					if h.Title != "" {
+						httpInfo += fmt.Sprintf(" %q", h.Title)
+					}
+					if h.Redirect != "" {
+						httpInfo += fmt.Sprintf(" → %s", h.Redirect)
+					}
+					if len(h.Tech) > 0 {
+						httpInfo += fmt.Sprintf(" (%s)", strings.Join(h.Tech, ", "))
+					}
+					if ban != "" {
+						ban = ban + "  " + httpInfo
+					} else {
+						ban = httpInfo
+					}
+				} else if *flagDebug {
+					fmt.Fprintf(os.Stderr, "[debug] http probe %s:%d failed: %s\n", target, r.Port, err)
 				}
 			}
 		}

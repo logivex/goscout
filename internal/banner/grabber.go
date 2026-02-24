@@ -1,15 +1,14 @@
 package banner
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
 	"time"
 )
 
-// ─── grabber ──────────────────────────────────────────────────────────────────
-
-// Grabber opens TCP connections and reads service banners.
+// Grabber performs TCP banner grabbing with optional TLS support.
 type Grabber struct {
 	Timeout time.Duration
 }
@@ -19,10 +18,27 @@ func New(timeout time.Duration) *Grabber {
 	return &Grabber{Timeout: timeout}
 }
 
-// Grab connects to host:port over TCP and reads the service banner.
+// Grab connects to host:port, reads the banner, and identifies the service.
+// For ports 443 and 8443 it uses TLS.
 func (g *Grabber) Grab(host string, port int) (*Result, error) {
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	conn, err := net.DialTimeout("tcp", addr, g.Timeout)
+
+	var (
+		conn net.Conn
+		err  error
+	)
+
+	isTLS := port == 443 || port == 8443
+	if isTLS {
+		conn, err = tls.DialWithDialer(
+			&net.Dialer{Timeout: g.Timeout},
+			"tcp",
+			addr,
+			&tls.Config{InsecureSkipVerify: true},
+		)
+	} else {
+		conn, err = net.DialTimeout("tcp", addr, g.Timeout)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -33,6 +49,7 @@ func (g *Grabber) Grab(host string, port int) (*Result, error) {
 	buf := make([]byte, 1024)
 	n, err := conn.Read(buf)
 	if err != nil && err != io.EOF {
+		// nothing sent on connect — probe with HTTP HEAD
 		conn.SetDeadline(time.Now().Add(g.Timeout))
 		fmt.Fprintf(conn, "HEAD / HTTP/1.0\r\nHost: %s\r\n\r\n", host)
 		conn.SetReadDeadline(time.Now().Add(g.Timeout))
@@ -44,6 +61,7 @@ func (g *Grabber) Grab(host string, port int) (*Result, error) {
 
 	raw := string(buf[:n])
 	service, version := Identify(raw)
+
 	return &Result{
 		Port:    port,
 		Raw:     raw,
