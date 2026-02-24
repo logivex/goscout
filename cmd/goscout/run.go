@@ -189,7 +189,10 @@ func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) e
 
 		if r.State == portscan.StateOpen {
 			openCount++
-			if cfg.Banner {
+
+			isHTTPPort := r.Port == 80 || r.Port == 443 || r.Port == 8080 || r.Port == 8443 || r.Port == 8888
+
+			if cfg.Banner && !(isHTTPPort && *flagHTTP) {
 				if b, err := grabber.Grab(target, r.Port); err == nil {
 					svc = b.Service
 					if b.Service != "" && b.Version != "" {
