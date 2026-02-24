@@ -48,46 +48,54 @@ func New(timeout time.Duration) *Prober {
 	return &Prober{client: client, timeout: timeout}
 }
 
-// Probe sends an HTTP GET to host:port and returns the result.
-// For ports 443 and 8443 it tries HTTPS first, then HTTP.
-// For all other ports it tries HTTP first, then HTTPS.
+// Probe sends HTTP requests to host:port and returns the first successful result.
+// Both HTTP and HTTPS are tried in parallel; the first success wins.
 func (p *Prober) Probe(host string, port int) (*Result, error) {
-	var schemes []string
+	schemes := []string{"http", "https"}
 	if port == 443 || port == 8443 {
 		schemes = []string{"https", "http"}
-	} else {
-		schemes = []string{"http", "https"}
+	}
+
+	success := make(chan *Result, len(schemes))
+	failure := make(chan error, len(schemes))
+
+	for _, scheme := range schemes {
+		go func(s string) {
+			url := fmt.Sprintf("%s://%s:%d", s, host, port)
+			resp, err := p.client.Get(url)
+			if err != nil {
+				failure <- err
+				return
+			}
+			defer resp.Body.Close()
+
+			r := &Result{
+				URL:        url,
+				StatusCode: resp.StatusCode,
+				Server:     resp.Header.Get("Server"),
+			}
+			if loc := resp.Header.Get("Location"); loc != "" {
+				r.Redirect = loc
+			}
+			r.Tech = extractTech(resp.Header)
+
+			body := make([]byte, 4096)
+			n, _ := resp.Body.Read(body)
+			r.Title = extractTitle(string(body[:n]))
+
+			success <- r
+		}(scheme)
 	}
 
 	var lastErr error
-	for _, scheme := range schemes {
-		url := fmt.Sprintf("%s://%s:%d", scheme, host, port)
-		resp, err := p.client.Get(url)
-		if err != nil {
+	for i := 0; i < len(schemes); i++ {
+		select {
+		case r := <-success:
+			return r, nil
+		case err := <-failure:
 			lastErr = err
-			continue
 		}
-		defer resp.Body.Close()
-
-		result := &Result{
-			URL:        url,
-			StatusCode: resp.StatusCode,
-			Server:     resp.Header.Get("Server"),
-		}
-
-		if loc := resp.Header.Get("Location"); loc != "" {
-			result.Redirect = loc
-		}
-
-		result.Tech = extractTech(resp.Header)
-
-		body := make([]byte, 4096)
-		n, _ := resp.Body.Read(body)
-		result.Title = extractTitle(string(body[:n]))
-
-		return result, nil
 	}
-
 	return nil, lastErr
 }
 

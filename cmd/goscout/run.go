@@ -102,9 +102,7 @@ func run() {
 		go func(t string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			printMu.Lock()
-			err := scanTarget(t, ports, cfg)
-			printMu.Unlock()
+			err := scanTarget(t, ports, cfg, &printMu)
 			if err != nil {
 				var permErr *errors.PermissionError
 				if isPermErr(err, permErr) {
@@ -127,14 +125,16 @@ func run() {
 }
 
 // scanTarget resolves, scans, and prints results for a single target.
-func scanTarget(target string, ports []int, cfg config.Config) error {
+func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) error {
 	ip, err := resolveTarget(target)
 	if err != nil {
 		return err
 	}
 
 	if !*flagSilent && cfg.Output == "human" {
+		mu.Lock()
 		output.PrintHeader(target, ip.String(), version)
+		mu.Unlock()
 	}
 
 	start := time.Now()
@@ -166,8 +166,17 @@ func scanTarget(target string, ports []int, cfg config.Config) error {
 	}
 
 	grabber := banner.New(cfg.Timeout)
-	prober := httpprobe.New(cfg.Timeout)
+	prober := httpprobe.New(5 * time.Second)
 
+	type portRow struct {
+		port    int
+		state   string
+		svc     string
+		ban     string
+		cveLink string
+	}
+
+	var rows []portRow
 	var jsonPorts []output.JSONPort
 	openCount := 0
 
@@ -221,10 +230,8 @@ func scanTarget(target string, ports []int, cfg config.Config) error {
 			}
 		}
 
-		switch cfg.Output {
-		case "human":
-			output.PrintPort(r.Port, string(r.State), svc, ban, cveLink)
-		default:
+		rows = append(rows, portRow{r.Port, string(r.State), svc, ban, cveLink})
+		if cfg.Output != "human" {
 			jsonPorts = append(jsonPorts, output.JSONPort{
 				Port:    r.Port,
 				State:   string(r.State),
@@ -239,13 +246,22 @@ func scanTarget(target string, ports []int, cfg config.Config) error {
 	if cfg.RDNS {
 		if res, err := rdns.Lookup(ip.String()); err == nil && res != nil {
 			rdnsHostname = res.Hostname
-			if cfg.Output == "human" && !*flagSilent {
-				output.PrintRDNS(ip.String(), res.Hostname)
-			}
 		}
 	}
 
 	duration := time.Since(start).Round(time.Millisecond).String()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if cfg.Output == "human" {
+		for _, row := range rows {
+			output.PrintPort(row.port, row.state, row.svc, row.ban, row.cveLink)
+		}
+		if rdnsHostname != "" && !*flagSilent {
+			output.PrintRDNS(ip.String(), rdnsHostname)
+		}
+	}
 
 	switch cfg.Output {
 	case "json":
