@@ -214,6 +214,14 @@ func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) e
 
 			if *flagHTTP {
 				if h, err := prober.Probe(target, r.Port); err == nil {
+					// apply status filters
+					if *flagMatchStatus != "" && !statusMatches(h.StatusCode, *flagMatchStatus) {
+						continue
+					}
+					if *flagExcludeStatus != "" && statusMatches(h.StatusCode, *flagExcludeStatus) {
+						continue
+					}
+
 					httpInfo := fmt.Sprintf("[%d]", h.StatusCode)
 					if h.Title != "" {
 						httpInfo += fmt.Sprintf(" %q", h.Title)
@@ -541,4 +549,15 @@ func incrementIP(ip net.IP) {
 			break
 		}
 	}
+}
+
+// statusMatches reports whether code is in the comma-separated list of codes.
+func statusMatches(code int, list string) bool {
+	for _, s := range strings.Split(list, ",") {
+		s = strings.TrimSpace(s)
+		if n, err := strconv.Atoi(s); err == nil && n == code {
+			return true
+		}
+	}
+	return false
 }
