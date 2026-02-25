@@ -173,6 +173,7 @@ func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) e
 		state   string
 		svc     string
 		ban     string
+		tech    []string
 		cveLink string
 	}
 
@@ -186,6 +187,7 @@ func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) e
 		}
 
 		var svc, ban, cveLink string
+		var tech []string
 
 		if r.State == portscan.StateOpen {
 			openCount++
@@ -227,19 +229,21 @@ func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) e
 					} else {
 						ban = httpInfo
 					}
+					tech = h.Tech
 				} else if *flagDebug {
 					fmt.Fprintf(os.Stderr, "[debug] http probe %s:%d failed: %s\n", target, r.Port, err)
 				}
 			}
 		}
 
-		rows = append(rows, portRow{r.Port, string(r.State), svc, ban, cveLink})
+		rows = append(rows, portRow{r.Port, string(r.State), svc, ban, tech, cveLink})
 		if cfg.Output != "human" {
 			jsonPorts = append(jsonPorts, output.JSONPort{
 				Port:    r.Port,
 				State:   string(r.State),
 				Service: svc,
 				Banner:  ban,
+				Tech:    tech,
 				CVELink: cveLink,
 			})
 		}

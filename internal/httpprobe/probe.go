@@ -77,11 +77,10 @@ func (p *Prober) Probe(host string, port int) (*Result, error) {
 			if loc := resp.Header.Get("Location"); loc != "" {
 				r.Redirect = loc
 			}
-			r.Tech = extractTech(resp.Header)
-
 			body := make([]byte, 4096)
 			n, _ := resp.Body.Read(body)
 			r.Title = extractTitle(string(body[:n]))
+			r.Tech = fingerprint(resp.Header, string(body[:n]))
 
 			success <- r
 		}(scheme)
@@ -116,30 +115,4 @@ func extractTitle(body string) string {
 		title = title[:80]
 	}
 	return title
-}
-
-// extractTech identifies technologies from response headers.
-func extractTech(headers http.Header) []string {
-	var tech []string
-
-	checks := map[string]string{
-		"X-Powered-By":      "",
-		"X-Generator":       "",
-		"X-Drupal-Cache":    "Drupal",
-		"X-Wordpress-Cache": "WordPress",
-		"CF-Ray":            "Cloudflare",
-		"X-Shopify-Stage":   "Shopify",
-	}
-
-	for header, label := range checks {
-		if val := headers.Get(header); val != "" {
-			if label != "" {
-				tech = append(tech, label)
-			} else {
-				tech = append(tech, val)
-			}
-		}
-	}
-
-	return tech
 }
