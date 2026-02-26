@@ -16,12 +16,11 @@ import (
 	"github.com/logivex/goscout/config"
 	"github.com/logivex/goscout/internal/banner"
 	"github.com/logivex/goscout/internal/errors"
+	"github.com/logivex/goscout/internal/httpprobe"
 	"github.com/logivex/goscout/internal/output"
 	"github.com/logivex/goscout/internal/portscan"
 	"github.com/logivex/goscout/internal/rdns"
 )
-
-// ─── input ────────────────────────────────────────────────────────────────────
 
 type inputMode int
 
@@ -35,8 +34,6 @@ type input struct {
 	mode    inputMode
 	targets []string
 }
-
-// ─── run ──────────────────────────────────────────────────────────────────────
 
 // run is the main entry point after flag parsing.
 func run() {
@@ -73,14 +70,12 @@ func run() {
 			cfg.Rate, cfg.Timeout, cfg.Concurrency)
 	}
 
-	// resolve port list
 	ports, err := resolvePorts(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %s\n", err)
 		os.Exit(2)
 	}
 
-	// expand CIDRs and prepare targets
 	expanded, err := expandTargets(in.targets)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %s\n", err)
@@ -96,7 +91,6 @@ func run() {
 		fmt.Fprintf(os.Stderr, "[debug] expanded %d targets: %v\n", n, show)
 	}
 
-	// run each target concurrently; printMu serializes output.
 	var wg sync.WaitGroup
 	var printMu sync.Mutex
 	sem := make(chan struct{}, 10)
@@ -108,16 +102,13 @@ func run() {
 		go func(t string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			printMu.Lock()
 			err := scanTarget(t, ports, cfg, &printMu)
-			printMu.Unlock()
 			if err != nil {
 				var permErr *errors.PermissionError
 				if isPermErr(err, permErr) {
 					fmt.Fprintf(os.Stderr, "%s\n", err)
 					os.Exit(3)
 				}
-				// "no open ports" is not an error worth logging.
 				if err.Error() != "no open ports found" {
 					fmt.Fprintf(os.Stderr, "error [%s]: %s\n", t, err)
 				}
@@ -133,27 +124,31 @@ func run() {
 	}
 }
 
-// ─── scan target ──────────────────────────────────────────────────────────────
-
-// scanTarget resolves, scans, and outputs results for a single target.
+// scanTarget resolves, scans, and prints results for a single target.
 func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) error {
-	// resolve domain to IP
 	ip, err := resolveTarget(target)
 	if err != nil {
 		return err
 	}
 
 	if !*flagSilent && cfg.Output == "human" {
+		mu.Lock()
 		output.PrintHeader(target, ip.String(), version)
+		mu.Unlock()
 	}
 
 	start := time.Now()
 
-	// port scan
+	// reduce concurrency for large scans to avoid network buffer overflow
+	concurrency := cfg.Concurrency
+	if len(ports) > 10000 && concurrency > 200 {
+		concurrency = 200
+	}
+
 	scanCfg := portscan.Config{
 		Rate:        cfg.Rate,
 		Timeout:     cfg.Timeout,
-		Concurrency: cfg.Concurrency,
+		Concurrency: concurrency,
 		Retries:     cfg.Retries,
 		SrcPort:     randomPort(),
 	}
@@ -164,32 +159,43 @@ func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) e
 		return err
 	}
 
-	// debug: raw scan results
 	if *flagDebug {
 		for _, r := range results {
 			fmt.Fprintf(os.Stderr, "[debug] scan result: port=%d state=%s\n", r.Port, r.State)
 		}
 	}
 
-	// banner grabber
 	grabber := banner.New(cfg.Timeout)
+	prober := httpprobe.New(5 * time.Second)
 
-	// output results
+	type portRow struct {
+		port    int
+		state   string
+		svc     string
+		ban     string
+		tech    []string
+		cveLink string
+	}
+
+	var rows []portRow
 	var jsonPorts []output.JSONPort
 	openCount := 0
 
 	for _, r := range results {
-		// filtered and closed ports are shown only with -v
 		if r.State != portscan.StateOpen && !*flagVerbose {
 			continue
 		}
 
 		var svc, ban, cveLink string
+		var tech []string
 
 		if r.State == portscan.StateOpen {
 			openCount++
-			if cfg.Banner {
-				if b, err := grabber.Grab(ip.String(), r.Port); err == nil {
+
+			isHTTPPort := r.Port == 80 || r.Port == 443 || r.Port == 8080 || r.Port == 8443 || r.Port == 8888
+
+			if cfg.Banner && !(isHTTPPort && *flagHTTP) {
+				if b, err := grabber.Grab(target, r.Port); err == nil {
 					svc = b.Service
 					if b.Service != "" && b.Version != "" {
 						ban = fmt.Sprintf("%s/%s", b.Service, b.Version)
@@ -205,49 +211,86 @@ func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) e
 					cveLink = b.CVELink
 				}
 			}
+
+			if *flagHTTP {
+				if h, err := prober.Probe(target, r.Port); err == nil {
+					// apply status filters
+					if *flagMatchStatus != "" && !statusMatches(h.StatusCode, *flagMatchStatus) {
+						continue
+					}
+					if *flagExcludeStatus != "" && statusMatches(h.StatusCode, *flagExcludeStatus) {
+						continue
+					}
+
+					httpInfo := fmt.Sprintf("[%d]", h.StatusCode)
+					if h.Title != "" {
+						httpInfo += fmt.Sprintf(" %q", h.Title)
+					}
+					if h.Redirect != "" {
+						httpInfo += fmt.Sprintf(" → %s", h.Redirect)
+					}
+					if len(h.Tech) > 0 {
+						httpInfo += fmt.Sprintf(" (%s)", strings.Join(h.Tech, ", "))
+					}
+					if ban != "" {
+						ban = ban + "  " + httpInfo
+					} else {
+						ban = httpInfo
+					}
+					tech = h.Tech
+				} else if *flagDebug {
+					fmt.Fprintf(os.Stderr, "[debug] http probe %s:%d failed: %s\n", target, r.Port, err)
+				}
+			}
 		}
 
-		switch cfg.Output {
-		case "human":
-			output.PrintPort(r.Port, string(r.State), svc, ban, cveLink)
-		default:
+		rows = append(rows, portRow{r.Port, string(r.State), svc, ban, tech, cveLink})
+		if cfg.Output != "human" {
 			jsonPorts = append(jsonPorts, output.JSONPort{
 				Port:    r.Port,
 				State:   string(r.State),
 				Service: svc,
 				Banner:  ban,
+				Tech:    tech,
 				CVELink: cveLink,
 			})
 		}
 	}
 
-	// rdns
 	var rdnsHostname string
 	if cfg.RDNS {
 		if res, err := rdns.Lookup(ip.String()); err == nil && res != nil {
 			rdnsHostname = res.Hostname
-			if cfg.Output == "human" && !*flagSilent {
-				output.PrintRDNS(ip.String(), res.Hostname)
-			}
 		}
 	}
 
 	duration := time.Since(start).Round(time.Millisecond).String()
 
-	// final output
+	mu.Lock()
+	defer mu.Unlock()
+
+	if cfg.Output == "human" {
+		for _, row := range rows {
+			output.PrintPort(row.port, row.state, row.svc, row.ban, row.cveLink)
+		}
+		if rdnsHostname != "" && !*flagSilent {
+			output.PrintRDNS(ip.String(), rdnsHostname)
+		}
+	}
+
 	switch cfg.Output {
 	case "json":
-		res := output.JSONResult{
-			Target: target,
-			IP:     ip.String(),
-			RDNS:   rdnsHostname,
-			Ports:  jsonPorts,
-			Meta: output.JSONMeta{
+		res := output.NewJSONResult(
+			target,
+			ip.String(),
+			rdnsHostname,
+			jsonPorts,
+			output.JSONMeta{
 				Scanned:  len(ports),
 				Open:     openCount,
 				Duration: duration,
 			},
-		}
+		)
 		if *flagFile != "" {
 			output.WriteJSON(*flagFile, res)
 		} else {
@@ -272,7 +315,6 @@ func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) e
 		}
 	}
 
-	// return non-nil to signal no open ports to caller
 	if openCount == 0 {
 		return fmt.Errorf("no open ports found")
 	}
@@ -280,16 +322,12 @@ func scanTarget(target string, ports []int, cfg config.Config, mu *sync.Mutex) e
 	return nil
 }
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
-
-// resolveTarget returns the IP for a given hostname or IP string.
+// resolveTarget returns the IP address for a hostname or IP string.
 func resolveTarget(target string) (net.IP, error) {
-	// return early if already an IP
 	if ip := net.ParseIP(target); ip != nil {
 		return ip, nil
 	}
 
-	// domain → resolve
 	addrs, err := net.LookupHost(target)
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve %s: %s", target, err)
@@ -305,9 +343,8 @@ func resolveTarget(target string) (net.IP, error) {
 	return ip, nil
 }
 
-// resolvePorts returns the port list based on --full, -p, or --top flags.
+// resolvePorts returns the list of ports to scan based on active flags.
 func resolvePorts(cfg config.Config) ([]int, error) {
-	// --full
 	if *flagFull {
 		ports := make([]int, 65535)
 		for i := range ports {
@@ -316,30 +353,52 @@ func resolvePorts(cfg config.Config) ([]int, error) {
 		return ports, nil
 	}
 
-	// -p 80,443,8080
 	if *flagPorts != "" {
 		return parsePorts(*flagPorts)
 	}
 
-	// --top N
 	return topPorts(cfg.Top), nil
 }
 
-// parsePorts parses a comma-separated port list (e.g. "80,443,8080").
+// parsePorts parses a comma-separated list of ports or ranges (e.g. "80,443,8000-8100").
 func parsePorts(s string) ([]int, error) {
 	var ports []int
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 1 || n > 65535 {
-			return nil, fmt.Errorf("invalid port: %s", p)
+	seen := make(map[int]bool)
+
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+
+		if strings.Contains(part, "-") {
+			bounds := strings.SplitN(part, "-", 2)
+			if len(bounds) != 2 {
+				return nil, fmt.Errorf("invalid port range: %s", part)
+			}
+			start, err1 := strconv.Atoi(strings.TrimSpace(bounds[0]))
+			end, err2 := strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if err1 != nil || err2 != nil || start < 1 || end > 65535 || start > end {
+				return nil, fmt.Errorf("invalid port range: %s", part)
+			}
+			for i := start; i <= end; i++ {
+				if !seen[i] {
+					seen[i] = true
+					ports = append(ports, i)
+				}
+			}
+		} else {
+			n, err := strconv.Atoi(part)
+			if err != nil || n < 1 || n > 65535 {
+				return nil, fmt.Errorf("invalid port: %s", part)
+			}
+			if !seen[n] {
+				seen[n] = true
+				ports = append(ports, n)
+			}
 		}
-		ports = append(ports, n)
 	}
 	return ports, nil
 }
 
-// topPorts returns the n most common ports, extending with sequential ports if needed.
+// topPorts returns the n most commonly scanned ports.
 func topPorts(n int) []int {
 	top := []int{
 		80, 443, 22, 21, 25, 53, 110, 143, 445, 3306,
@@ -352,7 +411,6 @@ func topPorts(n int) []int {
 	}
 
 	if n >= len(top) {
-		// n exceeds preset list — fill sequentially
 		existing := make(map[int]bool)
 		for _, p := range top {
 			existing[p] = true
@@ -379,13 +437,12 @@ func isPermErr(err error, target interface{}) bool {
 	return ok
 }
 
-// randomPort returns a random ephemeral port in the range 49152–65535.
+// randomPort returns a random port in the ephemeral range 49152–65535.
 func randomPort() int {
-	// ephemeral port range: 49152–65535
 	return 49152 + rand.Intn(16383)
 }
 
-// detectInput determines whether input comes from stdin pipe, -t flag, or a file.
+// detectInput determines the input source: pipe, -t flag, or file.
 func detectInput() (*input, error) {
 	stat, err := os.Stdin.Stat()
 	if err != nil {
@@ -407,7 +464,6 @@ func detectInput() (*input, error) {
 		return nil, nil
 	}
 
-	// treat as CIDR if it contains "/" and is not a .txt file path
 	if strings.Contains(*flagTarget, "/") && !strings.HasSuffix(*flagTarget, ".txt") {
 		return &input{mode: modeFlag, targets: []string{*flagTarget}}, nil
 	}
@@ -429,7 +485,7 @@ func detectInput() (*input, error) {
 	return &input{mode: modeFlag, targets: []string{*flagTarget}}, nil
 }
 
-// readLines reads non-empty, non-comment lines from f.
+// readLines reads non-empty, non-comment lines from r.
 func readLines(f *os.File) ([]string, error) {
 	var lines []string
 	scanner := bufio.NewScanner(f)
@@ -442,7 +498,7 @@ func readLines(f *os.File) ([]string, error) {
 	return lines, scanner.Err()
 }
 
-// isFile reports whether path points to an existing regular file.
+// isFile reports whether path is an existing regular file.
 func isFile(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -451,7 +507,7 @@ func isFile(path string) bool {
 	return !info.IsDir()
 }
 
-// expandTargets expands CIDR ranges and returns a flat list of targets.
+// expandTargets expands any CIDR ranges into individual IP addresses.
 func expandTargets(targets []string) ([]string, error) {
 	var expanded []string
 	for _, t := range targets {
@@ -468,7 +524,7 @@ func expandTargets(targets []string) ([]string, error) {
 	return expanded, nil
 }
 
-// expandCIDR returns all usable host IPs within the given CIDR block.
+// expandCIDR returns all usable host addresses within a CIDR block.
 func expandCIDR(cidr string) ([]string, error) {
 	ip, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
@@ -485,7 +541,7 @@ func expandCIDR(cidr string) ([]string, error) {
 	return ips, nil
 }
 
-// incrementIP increments an IP address by one.
+// incrementIP increments an IP address in-place by one.
 func incrementIP(ip net.IP) {
 	for j := len(ip) - 1; j >= 0; j-- {
 		ip[j]++
@@ -493,4 +549,15 @@ func incrementIP(ip net.IP) {
 			break
 		}
 	}
+}
+
+// statusMatches reports whether code is in the comma-separated list of codes.
+func statusMatches(code int, list string) bool {
+	for _, s := range strings.Split(list, ",") {
+		s = strings.TrimSpace(s)
+		if n, err := strconv.Atoi(s); err == nil && n == code {
+			return true
+		}
+	}
+	return false
 }

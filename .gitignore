@@ -1,5 +1,5 @@
 # binary
-goscout
+/goscout
 *.exe
 
 # Go

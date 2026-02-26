@@ -9,11 +9,12 @@ import (
 // ─── json ─────────────────────────────────────────────────────────────────────
 
 type JSONPort struct {
-	Port    int    `json:"port"`
-	State   string `json:"state"`
-	Service string `json:"service,omitempty"`
-	Banner  string `json:"banner,omitempty"`
-	CVELink string `json:"cve_link,omitempty"`
+	Port    int      `json:"port"`
+	State   string   `json:"state"`
+	Service string   `json:"service,omitempty"`
+	Banner  string   `json:"banner,omitempty"`
+	Tech    []string `json:"tech,omitempty"`
+	CVELink string   `json:"cve_link,omitempty"`
 }
 
 type JSONResult struct {
@@ -22,6 +23,19 @@ type JSONResult struct {
 	RDNS   string     `json:"rdns,omitempty"`
 	Ports  []JSONPort `json:"ports"`
 	Meta   JSONMeta   `json:"meta"`
+}
+
+func NewJSONResult(target, ip, rdns string, ports []JSONPort, meta JSONMeta) JSONResult {
+	if ports == nil {
+		ports = []JSONPort{}
+	}
+	return JSONResult{
+		Target: target,
+		IP:     ip,
+		RDNS:   rdns,
+		Ports:  ports,
+		Meta:   meta,
+	}
 }
 
 type JSONMeta struct {

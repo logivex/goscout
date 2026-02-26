@@ -10,24 +10,27 @@ const version = "0.1.0"
 // ─── flags ────────────────────────────────────────────────────────────────────
 
 var (
-	flagTarget      = flag.String("t", "", "target: IP, domain, CIDR, or file path")
-	flagPorts       = flag.String("p", "", "specific ports: 80,443,8080")
-	flagTop         = flag.Int("top", 1000, "scan top N ports")
-	flagFull        = flag.Bool("full", false, "scan all 65535 ports")
-	flagRate        = flag.Int("rate", 500, "packets per second")
-	flagTimeout     = flag.String("timeout", "800ms", "per port timeout")
-	flagConcurrency = flag.Int("concurrency", 1000, "concurrent ports")
-	flagRetries     = flag.Int("retries", 1, "retries per port")
-	flagNoSYN       = flag.Bool("no-syn", false, "connect scan instead of SYN")
-	flagBanner      = flag.Bool("banner", false, "enable banner grabbing")
-	flagRDNS        = flag.Bool("rdns", false, "enable reverse DNS lookup")
-	flagOutput      = flag.String("o", "human", "output format: human, json, csv")
-	flagFile        = flag.String("f", "", "save output to file")
-	flagSilent      = flag.Bool("s", false, "silent mode — results only")
-	flagVerbose     = flag.Bool("v", false, "verbose mode")
-	flagDebug       = flag.Bool("debug", false, "debug mode")
-	flagConfig      = flag.String("config", "", "config file (default: ~/.goscout.yaml)")
-	flagVersion     = flag.Bool("version", false, "print version")
+	flagTarget        = flag.String("t", "", "target: IP, domain, CIDR, or file path")
+	flagPorts         = flag.String("p", "", "specific ports: 80,443,8080")
+	flagTop           = flag.Int("top", 1000, "scan top N ports")
+	flagFull          = flag.Bool("full", false, "scan all 65535 ports")
+	flagRate          = flag.Int("rate", 500, "packets per second")
+	flagTimeout       = flag.String("timeout", "800ms", "per port timeout")
+	flagConcurrency   = flag.Int("concurrency", 1000, "concurrent ports")
+	flagRetries       = flag.Int("retries", 1, "retries per port")
+	flagNoSYN         = flag.Bool("no-syn", false, "connect scan instead of SYN")
+	flagBanner        = flag.Bool("banner", false, "enable banner grabbing")
+	flagRDNS          = flag.Bool("rdns", false, "enable reverse DNS lookup")
+	flagHTTP          = flag.Bool("http", false, "enable HTTP probe (title, status, redirect)")
+	flagMatchStatus   = flag.String("match-status", "", "only show results with these HTTP status codes: 200,403")
+	flagExcludeStatus = flag.String("exclude-status", "", "hide results with these HTTP status codes: 301,302")
+	flagOutput        = flag.String("o", "human", "output format: human, json, csv")
+	flagFile          = flag.String("f", "", "save output to file")
+	flagSilent        = flag.Bool("s", false, "silent mode — results only")
+	flagVerbose       = flag.Bool("v", false, "verbose mode")
+	flagDebug         = flag.Bool("debug", false, "debug mode")
+	flagConfig        = flag.String("config", "", "config file (default: ~/.goscout.yaml)")
+	flagVersion       = flag.Bool("version", false, "print version")
 )
 
 // ─── help ─────────────────────────────────────────────────────────────────────
@@ -72,5 +75,6 @@ EXAMPLES:
   goscout -t 1.2.3.4 -p 80,443,8080
   goscout -t targets.txt --full -o json -f out.json
   subfinder -d example.com | goscout --banner -o json
+
 `, version)
 }
